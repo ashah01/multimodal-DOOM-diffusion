@@ -12,12 +12,11 @@
 #####################################################################
 
 import os
-from random import choice
-from PIL import Image
-import vizdoom as vzd
 import pickle
-import time
+from random import choice
 
+import vizdoom as vzd
+from PIL import Image
 
 # class DoomData(vzd.DoomGame):
 #     def complete_action(self, choice, tics):
@@ -109,30 +108,30 @@ actions = [
 # Sets time that will pause the engine after each action (in seconds)
 # Without this everything would go too fast for you to keep track of what's happening.
 
-total_frames = 1
+total_frames = 0
 i = 1
+alr_done = False
 
 while total_frames < 160_000:
     print(f"Episode #{i}")
 
     # Starts a new episode. It is not needed right after init() but it doesn't cost much. At least the loop is nicer.
     game.new_episode()
-    ep_len = 1
+    ep_len = 0
     # Loading animation prevents any other action from going through
     game.make_action([False, False, False], 5)
 
     action_set = []
-    os.mkdir(f"./frames_dataset/episode_{i}")
+    image_memory = []
+    if not alr_done:
+        os.mkdir(f"./frames_dataset_test/episode_{i}")
     while not game.is_episode_finished():
-
+        ep_len += 1
         # Gets the state
         state = game.get_state()
         screen_buf = state.screen_buffer
+        image_memory.append(screen_buf)
 
-        Image.fromarray(screen_buf).save(
-            f"./frames_dataset/episode_{i}/{ep_len}.png"
-        )
-        ep_len += 1
         a = choice(actions)
 
         if a == [False, False, True] and 2 in action_set[-13:]:
@@ -141,11 +140,22 @@ while total_frames < 160_000:
         r = game.make_action(a)
         action_set.append(a.index(True) if True in a else 3)
 
-    total_frames += ep_len - 1
+    vals_to_remove = ep_len % 16
+    image_memory = image_memory[:-vals_to_remove]
+    action_set = action_set[:-vals_to_remove]
 
-    with open(f"./frames_dataset/episode_{i}/actions.pkl", "wb") as f:
-        pickle.dump(action_set, f)
+    if len(image_memory) > 0:
+        with open(f"./frames_dataset_test/episode_{i}/actions.pkl", "wb") as f:
+            pickle.dump(action_set, f)
 
-    i += 1
+        for idx, img in enumerate(image_memory):    
+            Image.fromarray(img).save(f"./frames_dataset_test/episode_{i}/{idx + 1}.png")
+
+        total_frames += ep_len - vals_to_remove
+        i += 1
+
+        alr_done = False
+    else:
+        alr_done = True
 # It will be done automatically anyway but sometimes you need to do it in the middle of the program...
 game.close()

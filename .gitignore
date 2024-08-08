@@ -1,5 +1,5 @@
 .DS_Store
 __pycache__
 wandb/
-frames_dataset/*/*.png
+frames_dataset_test
 .idea

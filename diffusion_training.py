@@ -1,9 +1,11 @@
-import torch
-from torchvision import transforms
-import wandb
-from diffusers import DDIMScheduler
-from tqdm import tqdm
 import copy
+
+import torch
+import wandb
+from diffusers.schedulers.scheduling_ddim import DDIMScheduler
+from torchvision import transforms
+from tqdm import tqdm
+
 from condition_dataset import ConditionalFramesDataset
 from model import UNet
 
@@ -12,6 +14,8 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 batch_size = 64
 dataset = ConditionalFramesDataset("frames_dataset_skip", 3)
 dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+
 model = UNet().to(device)
 master_params = list(model.parameters())
 optimizer = torch.optim.AdamW(master_params, lr=1e-4, weight_decay=0.05)
@@ -97,7 +101,9 @@ mask[batch_size:] = 0
 image_mask = mask.view(-1, 1, 1, 1)
 text_mask = mask.view(-1, 1, 1)  # [batch, sequence, vocab]
 
-scheduler = DDIMScheduler(num_train_timesteps=diffusion_steps, clip_sample=True, set_alpha_to_one=True)
+scheduler = DDIMScheduler(
+    num_train_timesteps=diffusion_steps, clip_sample=True, set_alpha_to_one=True
+)
 scheduler.set_timesteps(50)
 
 
