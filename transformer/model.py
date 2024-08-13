@@ -42,6 +42,25 @@ class EmbeddingProjection(nn.Module):
         x = self.dropout(x)
         return x
 
+class MlpHead(nn.Module):
+    def __init__(self, image_size, frames, in_channels, hidden_dim, patch_size):
+        super().__init__()
+        self.image_size = image_size
+        self.frames = frames
+        self.in_channels = in_channels
+        self.hidden_dim = hidden_dim
+        self.patch_size = patch_size
+        self.linear = nn.Linear(hidden_dim, self.patch_size ** 2 * self.in_channels)
+
+    def forward(self, x):
+        x = x.view(-1, self.frames, self.image_size // self.patch_size, self.image_size // self.patch_size, self.hidden_dim)
+        x = self.linear(x)
+        x = x.view(-1, self.frames, self.image_size // self.patch_size, self.image_size // self.patch_size, self.patch_size, self.patch_size, self.in_channels)
+        x = x.permute(0, 6, 1, 2, 4, 3, 5).contiguous()
+        x = x.view(-1, self.in_channels, self.frames, self.image_size, self.image_size)
+
+        return x
+
 class ActionEmbedding(nn.Module):
     def __init__(self, num_actions, embedding_dim, seq_len):
         super().__init__()
@@ -57,7 +76,7 @@ class ActionEmbedding(nn.Module):
         return action_embeddings
 
 
-class SpatialAttention(nn.Module):
+class SpatiotemporalAttention(nn.Module):
     def __init__(self, image_size, hidden_dim, query_dim, context_dim, window_size: tuple[int, int, int], frames,
                  patch_size, num_heads, dropout):
         super().__init__()
@@ -88,16 +107,16 @@ class SpatialAttention(nn.Module):
         x = x.permute(0, 1, 2, 3, 5, 6, 7, 4).contiguous()
         x = x.view(B, num_windows_T * num_windows_H * num_windows_W, T * H * W, C)
 
-        context = condition if condition else x
+        context = (condition.unsqueeze(1).repeat(1, num_windows_T * num_windows_H * num_windows_W, 1, 1)) if condition is not None else x
 
         # Apply attention within each window
         q = self.q(x).reshape(B, num_windows_T * num_windows_H * num_windows_W, T * H * W, self.num_heads, self.head_dim)
         q = q.permute(0, 3, 1, 2, 4)
 
-        k = self.k(context).reshape(B, num_windows_T * num_windows_H * num_windows_W, T * H * W, self.num_heads, self.head_dim)
+        k = self.k(context).reshape(B, num_windows_T * num_windows_H * num_windows_W, -1, self.num_heads, self.head_dim)
         k = k.permute(0, 3, 1, 2, 4)
 
-        v = self.v(context).reshape(B, num_windows_T * num_windows_H * num_windows_W, T * H * W, self.num_heads, self.head_dim)
+        v = self.v(context).reshape(B, num_windows_T * num_windows_H * num_windows_W, -1, self.num_heads, self.head_dim)
         v = v.permute(0, 3, 1, 2, 4)
 
         attn = (q @ k.transpose(-2, -1)) * (1.0 / torch.sqrt(torch.tensor(self.head_dim, dtype=torch.float32)))
@@ -110,14 +129,14 @@ class SpatialAttention(nn.Module):
         # Reconstruct the 3D structure from windows
         x = windows.view(B, num_windows_T, num_windows_H, num_windows_W, T, H, W, C)
         x = x.permute(0, 1, 4, 2, 5, 3, 6, 7).contiguous()
-        x = x.view(B, self.frames, self.patch_dim, self.patch_dim, C)
+        # x = x.view(B, self.frames, self.patch_dim, self.patch_dim, C)
 
         # Flatten back to 1D string of patches
         x = x.view(B, N, C)
         return x
 
 
-class SpatiotemporalAttention(nn.Module):
+class SpatialAttention(nn.Module):
     def __init__(self, image_size, hidden_dim, query_dim, context_dim, frames, patch_size, num_heads, dropout):
         super().__init__()
         context_dim = context_dim if context_dim else query_dim
@@ -146,28 +165,17 @@ class SpatiotemporalAttention(nn.Module):
         x = x.permute(0, 1, 2, 3, 5, 6, 4).contiguous() # [B, T, num_windows_H, num_windows_W, H, W, C]
         x = x.view(B, T * num_windows_H * num_windows_W, H * W, C)
 
-        context = condition if condition is not None else x
-
+        context = (condition.unsqueeze(1).repeat(1, T * num_windows_H * num_windows_W, 1, 1)) if condition is not None else x
 
         # Apply attention within each window
         q = self.q(x).reshape(B, T * num_windows_H * num_windows_W, H * W, self.num_heads, self.head_dim)
         q = q.permute(0, 3, 1, 2, 4)
 
-        if condition is not None:
-            import IPython; IPython.embed()
-        
-        if condition is None:
-            k = self.k(context).reshape(B, T * num_windows_H * num_windows_W, H * W, self.num_heads, self.head_dim)
-            k = k.permute(0, 3, 1, 2, 4)
+        k = self.k(context).reshape(B, T * num_windows_H * num_windows_W, -1, self.num_heads, self.head_dim)
+        k = k.permute(0, 3, 1, 2, 4)
 
-            v = self.v(context).reshape(B, T * num_windows_H * num_windows_W, H * W, self.num_heads, self.head_dim)
-            v = v.permute(0, 3, 1, 2, 4)
-        else:
-            k = self.k(context).reshape(B, -1, self.num_heads, self.head_dim)
-            k = k.permute(0, 2, 1, 3)
-
-            v = self.v(context).reshape(B, -1, self.num_heads, self.head_dim)
-            v = v.permute(0, 2, 1, 3)
+        v = self.v(context).reshape(B, T * num_windows_H * num_windows_W, -1, self.num_heads, self.head_dim)
+        v = v.permute(0, 3, 1, 2, 4)
 
         attn = (q @ k.transpose(-2, -1)) * (1.0 / torch.sqrt(torch.tensor(self.head_dim, dtype=torch.float32)))
         attn = attn.softmax(dim=-1)
@@ -180,7 +188,7 @@ class SpatiotemporalAttention(nn.Module):
         x = x.view(B, T, num_windows_H, num_windows_W, H, W, C)
         x = x.permute(0, 1, 2, 4, 3, 5, 6).contiguous()
 
-        x = x.view(B, self.frames, self.patch_dim, self.patch_dim, C)
+        # x = x.view(B, self.frames, self.patch_dim, self.patch_dim, C)
 
         # Flatten back to 1D string of patches
         x = x.view(B, N, C)
@@ -270,15 +278,22 @@ class SpatialtemporalBlock(nn.Module):
 class DiT(nn.Module):
     def __init__(self, n_layers, image_size, hidden_dim, query_dim, context_dim, frames, patch_size, window_size, seq_len, num_heads, dropout):
         super().__init__()
+        self.frames = frames
+        self.image_size = image_size
+        self.patch_size = patch_size
+        self.hidden_dim = hidden_dim
+        self.query_dim = query_dim
         self.patch_embed = EmbeddingProjection(image_size, frames, query_dim, hidden_dim, patch_size, dropout)
         self.action_embed = ActionEmbedding(4, context_dim, seq_len)
         self.transformer = nn.ModuleList([(SpatialtemporalBlock if i % 2 == 0 else SpatialBlock)(image_size, hidden_dim, context_dim, frames, patch_size, window_size, num_heads, dropout) for i in range(1, n_layers + 1)])
+        self.mlp_head = MlpHead(image_size, frames, query_dim, hidden_dim, self.patch_size)
 
     def forward(self, x, c):
         x = self.patch_embed(x)
         c = self.action_embed(c)
         for block in self.transformer:
             x = block(x, c) # TODO: add conditioning functionality
+        x = self.mlp_head(x)
         return x
 
 if __name__ == "__main__":
@@ -286,6 +301,5 @@ if __name__ == "__main__":
     # [16, 3, 128, 128] -> [1, 256, 4, 16, 16] (note: 18 is the z_channel / encoder_out dimension)
     x = torch.randn(1, 256, 4, 16, 16)
     c = torch.tensor(random.choices(range(4), k=15+13)).unsqueeze(0)
-    model = DiT(2, 16, 64, 256, 64, 4, 1, (4, 4, 4), 15+13, 8, 0)    
-    model(x, c)
-    # print(model(t).shape)
+    model = DiT(2, 16, 64, 256, 64, 4, 1, (4, 8, 8), 15+13, 8, 0)    
+    print(model(x, c).shape)
