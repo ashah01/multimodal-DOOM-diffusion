@@ -42,8 +42,22 @@ class EmbeddingProjection(nn.Module):
         x = self.dropout(x)
         return x
 
+class ActionEmbedding(nn.Module):
+    def __init__(self, num_actions, embedding_dim, seq_len):
+        super().__init__()
+        self.seq_len = seq_len
+        self.embedding = nn.Embedding(num_actions + 1, embedding_dim)
+        self.positional_encoding = nn.Parameter(torch.zeros(1, self.seq_len, embedding_dim))
 
-class SpatiotemporalAttention(nn.Module):
+    def forward(self, actions):
+        # Convert actions to embeddings
+        action_embeddings = self.embedding(actions)
+        action_embeddings = action_embeddings + self.positional_encoding
+        
+        return action_embeddings
+
+
+class SpatialAttention(nn.Module):
     def __init__(self, image_size, hidden_dim, query_dim, context_dim, window_size: tuple[int, int, int], frames,
                  patch_size, num_heads, dropout):
         super().__init__()
@@ -59,8 +73,9 @@ class SpatiotemporalAttention(nn.Module):
         self.k = nn.Linear(context_dim, hidden_dim, bias=False)
         self.v = nn.Linear(context_dim, hidden_dim, bias=False)
 
-        self.out = nn.Linear(hidden_dim, hidden_dim)
         self.drop = nn.Dropout(dropout)
+        self.out = nn.Linear(hidden_dim, hidden_dim)
+        
 
     def forward(self, x, condition=None):
         B, N, C = x.shape
@@ -87,10 +102,10 @@ class SpatiotemporalAttention(nn.Module):
 
         attn = (q @ k.transpose(-2, -1)) * (1.0 / torch.sqrt(torch.tensor(self.head_dim, dtype=torch.float32)))
         attn = attn.softmax(dim=-1)
+        attn = self.drop(attn)
 
         windows = (attn @ v).permute(0, 2, 3, 1, 4).reshape(B, num_windows_T * num_windows_H * num_windows_W, T * H * W, C)
         windows = self.out(windows)
-        windows = self.drop(windows)
 
         # Reconstruct the 3D structure from windows
         x = windows.view(B, num_windows_T, num_windows_H, num_windows_W, T, H, W, C)
@@ -102,7 +117,7 @@ class SpatiotemporalAttention(nn.Module):
         return x
 
 
-class SpatialAttention(nn.Module):
+class SpatiotemporalAttention(nn.Module):
     def __init__(self, image_size, hidden_dim, query_dim, context_dim, frames, patch_size, num_heads, dropout):
         super().__init__()
         context_dim = context_dim if context_dim else query_dim
@@ -116,8 +131,9 @@ class SpatialAttention(nn.Module):
         self.k = nn.Linear(context_dim, hidden_dim, bias=False)
         self.v = nn.Linear(context_dim, hidden_dim, bias=False)
 
-        self.out = nn.Linear(hidden_dim, hidden_dim)
         self.drop = nn.Dropout(dropout)
+        self.out = nn.Linear(hidden_dim, hidden_dim)
+        
 
     def forward(self, x, condition=None):
         B, N, C = x.shape
@@ -130,25 +146,35 @@ class SpatialAttention(nn.Module):
         x = x.permute(0, 1, 2, 3, 5, 6, 4).contiguous() # [B, T, num_windows_H, num_windows_W, H, W, C]
         x = x.view(B, T * num_windows_H * num_windows_W, H * W, C)
 
-        context = condition if condition else x
+        context = condition if condition is not None else x
 
 
         # Apply attention within each window
         q = self.q(x).reshape(B, T * num_windows_H * num_windows_W, H * W, self.num_heads, self.head_dim)
         q = q.permute(0, 3, 1, 2, 4)
 
-        k = self.k(context).reshape(B, T * num_windows_H * num_windows_W, H * W, self.num_heads, self.head_dim)
-        k = k.permute(0, 3, 1, 2, 4)
+        if condition is not None:
+            import IPython; IPython.embed()
+        
+        if condition is None:
+            k = self.k(context).reshape(B, T * num_windows_H * num_windows_W, H * W, self.num_heads, self.head_dim)
+            k = k.permute(0, 3, 1, 2, 4)
 
-        v = self.v(context).reshape(B, T * num_windows_H * num_windows_W, H * W, self.num_heads, self.head_dim)
-        v = v.permute(0, 3, 1, 2, 4)
+            v = self.v(context).reshape(B, T * num_windows_H * num_windows_W, H * W, self.num_heads, self.head_dim)
+            v = v.permute(0, 3, 1, 2, 4)
+        else:
+            k = self.k(context).reshape(B, -1, self.num_heads, self.head_dim)
+            k = k.permute(0, 2, 1, 3)
+
+            v = self.v(context).reshape(B, -1, self.num_heads, self.head_dim)
+            v = v.permute(0, 2, 1, 3)
 
         attn = (q @ k.transpose(-2, -1)) * (1.0 / torch.sqrt(torch.tensor(self.head_dim, dtype=torch.float32)))
         attn = attn.softmax(dim=-1)
+        attn = self.drop(attn)
 
         x = (attn @ v).permute(0, 2, 3, 1, 4).reshape(B, T * num_windows_H * num_windows_W, H * W, C)
         x = self.out(x)
-        x = self.drop(x)
 
         # Reconstruct the 3D structure from windows
         x = x.view(B, T, num_windows_H, num_windows_W, H, W, C)
@@ -185,7 +211,7 @@ class MLP(nn.Module):
         return x
 
 
-class EncoderBlock(nn.Module):
+class SpatialBlock(nn.Module):
     def __init__(self, image_size, hidden_dim, context_dim, frames, patch_size, window_size, num_heads, dropout):
         super().__init__()
         self.ln1 = nn.LayerNorm(hidden_dim)
@@ -193,13 +219,9 @@ class EncoderBlock(nn.Module):
         self.ln2 = nn.LayerNorm(hidden_dim)
         self.local_cross_attention = SpatialAttention(image_size, hidden_dim, hidden_dim, context_dim, frames, patch_size, num_heads, dropout)
         self.ln3 = nn.LayerNorm(hidden_dim)
-        self.global_attention = SpatiotemporalAttention(image_size, hidden_dim, hidden_dim, None, window_size, frames, patch_size, num_heads, dropout)
-        self.ln4 = nn.LayerNorm(hidden_dim)
-        self.global_cross_attention = SpatiotemporalAttention(image_size, hidden_dim, hidden_dim, context_dim, window_size, frames, patch_size, num_heads, dropout)
-        self.ln5 = nn.LayerNorm(hidden_dim)
         self.feedforward = MLP(hidden_dim, hidden_dim, dropout)
 
-    def forward(self, x, context=None):
+    def forward(self, x, context):
         # Spatial Self-Attention
         x_spatial_norm = self.ln1(x)
         x_spatial_att = self.local_attention(x_spatial_norm)
@@ -210,38 +232,60 @@ class EncoderBlock(nn.Module):
         x_spatial_cross_att = self.local_cross_attention(x_spatial_cross_norm, context)
         x_spatial_cross = x_spatial + x_spatial_cross_att
 
-        # Spatiotemporal Self-Attention
-        x_spatiotemporal_norm = self.ln3(x_spatial_cross)
-        x_spatiotemporal_att = self.global_attention(x_spatiotemporal_norm)
-        x_spatiotemporal = x_spatial_cross + x_spatiotemporal_att
-
-        # Spatiotemporal Cross-Attention
-        x_spatiotemporal_cross_norm = self.ln4(x_spatiotemporal)
-        x_spatiotemporal_cross_att = self.global_cross_attention(x_spatiotemporal_cross_norm, context)
-        x_spatiotemporal_cross = x_spatiotemporal + x_spatiotemporal_cross_att
-
         # Feedforward Network
-        x_ff_norm = self.ln5(x_spatiotemporal_cross)
+        x_ff_norm = self.ln3(x_spatial_cross)
         x_ff = self.feedforward(x_ff_norm)
-        x_output = x_spatiotemporal_cross + x_ff
+        x_output = x_spatial_cross + x_ff
 
         return x_output
 
+class SpatialtemporalBlock(nn.Module):
+        def __init__(self, image_size, hidden_dim, context_dim, frames, patch_size, window_size, num_heads, dropout):
+            super().__init__()
+            self.ln1 = nn.LayerNorm(hidden_dim)
+            self.global_attention = SpatiotemporalAttention(image_size, hidden_dim, hidden_dim, None, window_size, frames, patch_size, num_heads, dropout)
+            self.ln2 = nn.LayerNorm(hidden_dim)
+            self.global_cross_attention = SpatiotemporalAttention(image_size, hidden_dim, hidden_dim, context_dim, window_size, frames, patch_size, num_heads, dropout)
+            self.ln3 = nn.LayerNorm(hidden_dim)
+            self.feedforward = MLP(hidden_dim, hidden_dim, dropout)
+        
+        def forward(self, x, context):
+            # Spatiotemporal Self-Attention
+            x_spatiotemporal_norm = self.ln1(x)
+            x_spatiotemporal_att = self.global_attention(x_spatiotemporal_norm)
+            x_spatiotemporal = x + x_spatiotemporal_att
+
+            # Spatiotemporal Cross-Attention
+            x_spatiotemporal_cross_norm = self.ln2(x_spatiotemporal)
+            x_spatiotemporal_cross_att = self.global_cross_attention(x_spatiotemporal_cross_norm, context)
+            x_spatiotemporal_cross = x_spatiotemporal + x_spatiotemporal_cross_att
+
+            x_ff_norm = self.ln3(x_spatiotemporal_cross)
+            x_ff = self.feedforward(x_ff_norm)
+            x_output = x_spatiotemporal_cross + x_ff
+
+            return x_output
+
+
 class DiT(nn.Module):
-    def __init__(self, n_layers, image_size, hidden_dim, query_dim, context_dim, frames, patch_size, window_size, num_heads, dropout):
+    def __init__(self, n_layers, image_size, hidden_dim, query_dim, context_dim, frames, patch_size, window_size, seq_len, num_heads, dropout):
         super().__init__()
         self.patch_embed = EmbeddingProjection(image_size, frames, query_dim, hidden_dim, patch_size, dropout)
-        self.transformer = nn.ModuleList([EncoderBlock(image_size, hidden_dim, context_dim, frames, patch_size, window_size, num_heads, dropout) for _ in range(n_layers)])
+        self.action_embed = ActionEmbedding(4, context_dim, seq_len)
+        self.transformer = nn.ModuleList([(SpatialtemporalBlock if i % 2 == 0 else SpatialBlock)(image_size, hidden_dim, context_dim, frames, patch_size, window_size, num_heads, dropout) for i in range(1, n_layers + 1)])
 
-    def forward(self, x):
+    def forward(self, x, c):
         x = self.patch_embed(x)
-        for enc_block in self.transformer:
-            x = enc_block(x)
+        c = self.action_embed(c)
+        for block in self.transformer:
+            x = block(x, c) # TODO: add conditioning functionality
         return x
 
 if __name__ == "__main__":
+    import random
     # [16, 3, 128, 128] -> [1, 256, 4, 16, 16] (note: 18 is the z_channel / encoder_out dimension)
-    t = torch.randn(3, 256, 4, 16, 16)
-    model = DiT(6, 16, 256, 256, None, 4, 1, (4, 4, 4), 8, 0.1)
-    print(sum([p.numel() for p in model.parameters()]))
+    x = torch.randn(1, 256, 4, 16, 16)
+    c = torch.tensor(random.choices(range(4), k=15+13)).unsqueeze(0)
+    model = DiT(2, 16, 64, 256, 64, 4, 1, (4, 4, 4), 15+13, 8, 0)    
+    model(x, c)
     # print(model(t).shape)

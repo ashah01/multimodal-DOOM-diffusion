@@ -18,7 +18,7 @@ Pad the first frames with no action, and give the first frame itself as the prio
 """
 
 class ConditionalVideoDataset(Dataset):
-    def __init__(self, directory, num_actions=16+13, clip_length=16, skip_length=16):
+    def __init__(self, directory, num_actions=15+13, clip_length=16, skip_length=16):
         self.num_actions = num_actions
         self.dir = directory
         self.clip_length = clip_length
@@ -68,7 +68,7 @@ class ConditionalVideoDataset(Dataset):
         padding = [3] * (self.num_actions - len(act_window))
         act_window = padding + act_window
 
-        return video, F.one_hot(torch.tensor(act_window), 4)
+        return video, torch.tensor(act_window)
 
 class ConditionalFramesDataset(Dataset):
     def __init__(self, directory, num_actions):
@@ -136,9 +136,7 @@ class ConditionalFramesDataset(Dataset):
 
 
 if __name__ == "__main__":
-    dataset = ConditionalFramesDataset(5)
-    dataloader = DataLoader(dataset, batch_size=16)
-    prev, actwin, target = next(iter(dataloader))
-    import IPython
-
-    IPython.embed()
+    dataset = ConditionalVideoDataset("frames_dataset")
+    dataloader = DataLoader(dataset, batch_size=1)
+    video, actwin = next(iter(dataloader))
+    print(actwin.shape)

@@ -6,20 +6,36 @@ from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from torchvision import transforms
 from tqdm import tqdm
 
-from condition_dataset import ConditionalFramesDataset
+from tokenizer.magvit2_pytorch import VideoTokenizer
+from condition_dataset import ConditionalVideoDataset
 from model import UNet
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 batch_size = 64
-dataset = ConditionalFramesDataset("frames_dataset_skip", 3)
+dataset = ConditionalVideoDataset("frames_dataset")
 dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
+tokenizer = VideoTokenizer( # use checkpoint config
+    image_size=128,
+    init_dim=22,
+    num_res_blocks=1,
+    ch_mult=(1, 2),
+    z_channels=256,
+    perceptual_loss_weight=0,
+    use_gan=False,
+    adversarial_loss_weight=0,
+).to(device)
+
+tokenizer.load("tokenizer/checkpoints/checkpoint.pt")
+tokenizer.eval()
+
+EPOCHS = 30
 
 model = UNet().to(device)
 master_params = list(model.parameters())
-optimizer = torch.optim.AdamW(master_params, lr=1e-4, weight_decay=0.05)
-
+optimizer = torch.optim.AdamW(master_params, lr=5e-4)
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, EPOCHS * len(dataloader), 5e-5)
 
 def update_ema(target_params, source_params, rate=0.99):
     for targ, src in zip(target_params, source_params):
@@ -32,7 +48,7 @@ ema_params = [copy.deepcopy(master_params) for _ in range(len(ema_rate))]
 # TODO: Enforce 0 terminal SNR
 beta_min = 0.0001
 beta_max = 0.02
-diffusion_steps = 500
+diffusion_steps = 1000
 betas = torch.linspace(beta_min, beta_max, diffusion_steps).to(device)
 alphas = 1 - betas
 alpha_bars = torch.cumprod(alphas, dim=0)
@@ -52,24 +68,28 @@ wandb.init(project="multimodal", mode="online")
 
 model.train()
 # Training loop
-for epochs in range(35):
-    for prev_image, action_window, target_image in dataloader:
+for epoch in range(EPOCHS):
+    for video, action_window in dataloader:
         optimizer.zero_grad()
 
         # Noisy image
-        x = target_image.to(device)
+        x = video.to(device)
         n = x.size(0)
+
+        x = tokenizer(x)
         eta = torch.randn_like(x, device=device)
         t = torch.randint(0, diffusion_steps, (n,), device=device)
         x = forward(x, t, eta)
 
-        # Conditioning signal
+        # Frame conditioning signal
         mask = torch.bernoulli(torch.full((x.size(0),), 0.9)).to(
             device
         )  # 10% unconditioned
         image_mask = mask.view(-1, 1, 1, 1)
         ic = image_mask * prev_image.to(device)
         x = torch.cat((x, ic), dim=1)
+
+        # Text conditioning signal
         text_mask = mask.view(-1, 1, 1)  # [batch, sequence, vocab]
         tc = text_mask * action_window.to(device)
 
@@ -79,6 +99,7 @@ for epochs in range(35):
         wandb.log({"MSE loss": loss.item()})
         loss.backward()
         optimizer.step()
+        scheduler.step()
         for rate, params in zip(ema_rate, ema_params):
             update_ema(params, master_params, rate=rate)
 
