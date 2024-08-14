@@ -286,6 +286,7 @@ class DiT(nn.Module):
         self.patch_embed = EmbeddingProjection(image_size, frames, query_dim, hidden_dim, patch_size, dropout)
         self.action_embed = ActionEmbedding(4, context_dim, seq_len)
         self.transformer = nn.ModuleList([(SpatialtemporalBlock if i % 2 == 0 else SpatialBlock)(image_size, hidden_dim, context_dim, frames, patch_size, window_size, num_heads, dropout) for i in range(1, n_layers + 1)])
+        self.ln = nn.LayerNorm(hidden_dim)
         self.mlp_head = MlpHead(image_size, frames, query_dim, hidden_dim, self.patch_size)
 
     def forward(self, x, c):
@@ -293,6 +294,7 @@ class DiT(nn.Module):
         c = self.action_embed(c)
         for block in self.transformer:
             x = block(x, c) # TODO: add conditioning functionality
+        x = self.ln(x)
         x = self.mlp_head(x)
         return x
 
